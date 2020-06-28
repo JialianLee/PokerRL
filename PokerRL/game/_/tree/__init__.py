@@ -1,1 +1,1 @@
-__all__ = ['PublicTree']
+__all__ = ['PublicTree', 'VRPublicTree']

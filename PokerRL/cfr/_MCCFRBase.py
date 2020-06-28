@@ -4,13 +4,14 @@
 import copy
 
 import numpy as np
+import sys
 
-from PokerRL.game._.tree.PublicTree import PublicTree
+from PokerRL.game._.tree.MCPublicTree import MCPublicTree
 from PokerRL.game.wrappers import HistoryEnvBuilder
 from PokerRL.rl.rl_util import get_env_cls_from_str
 
 
-class CFRBase:
+class MCCFRBase:
     """
     base class to all full-width (i.e. non MC) tabular CFR methods
     """
@@ -22,6 +23,8 @@ class CFRBase:
                  agent_bet_set,
                  algo_name,
                  starting_stack_sizes=None,
+                 innerloop_epi=None,
+                 sample_method='eps_greedy'
                  ):
         """
         Args:
@@ -36,9 +39,10 @@ class CFRBase:
                                                     If None, takes the default for the game.
         """
 
-        self._name = name
+        self._name = name # name=MC_CFR_EXAMPLE
         self._n_seats = 2
         self.touching_nodes = 0
+        self._sample_method = sample_method
 
         self._chief_handle = chief_handle
 
@@ -46,11 +50,13 @@ class CFRBase:
             self._starting_stack_sizes = [game_cls.DEFAULT_STACK_SIZE]
         else:
             self._starting_stack_sizes = copy.deepcopy(starting_stack_sizes)
-        self._game_cls_str = game_cls.__name__
+        # self._starting_stack_sizes = [13]
+
+        self._game_cls_str = game_cls.__name__ # StandardLeduc
 
         self._env_args = [
             game_cls.ARGS_CLS(n_seats=self._n_seats,
-                              starting_stack_sizes_list=[start_chips for _ in range(self._n_seats)],
+                              starting_stack_sizes_list=[start_chips for _ in range(self._n_seats)], #[13, 13]
                               bet_sizes_list_as_frac_of_pot=agent_bet_set,
                               )
             for start_chips in self._starting_stack_sizes
@@ -63,9 +69,10 @@ class CFRBase:
         ]
 
         self._trees = [
-            PublicTree(env_bldr=self._env_bldrs[idx],
+            MCPublicTree(env_bldr=self._env_bldrs[idx],
                        stack_size=self._env_args[idx].starting_stack_sizes_list,
-                       stop_at_street=None)
+                       stop_at_street=None,
+                       sample_method=self._sample_method)
             for idx in range(len(self._env_bldrs))
         ]
 
@@ -74,7 +81,7 @@ class CFRBase:
             print("Tree with stack size", tree.stack_size, "has", tree.n_nodes, "nodes out of which", tree.n_nonterm,
                   "are non-terminal.")
 
-        self._algo_name = algo_name
+        self._algo_name = algo_name # MCCFR
 
         self._exps_curr_total = [
             self._chief_handle.create_experiment(
@@ -94,7 +101,17 @@ class CFRBase:
         self._exp_all_averaged_avg_total = self._chief_handle.create_experiment(
             self._name + "_Avg_total_averaged_" + self._algo_name)
 
+        # self._chief_handle._log_buf._experiments
+        # {'MC_CFR_EXAMPLE_Curr_S13_total_MCCFR': {}, 
+        #  'MC_CFR_EXAMPLE_Avg_total_S13_MCCFR': {}, 
+        #  'MC_CFR_EXAMPLE_Curr_total_averaged_MCCFR': {}, 
+        #  'MC_CFR_EXAMPLE_Avg_total_averaged_MCCFR': {}}
+
         self._iter_counter = None
+        if innerloop_epi is None:
+            self._innerloop_epi = self._trees[0]._n_nodes
+        else:
+            self._innerloop_epi = innerloop_epi
 
     @property
     def name(self):
@@ -121,26 +138,23 @@ class CFRBase:
         self._log_curr_strat_expl()
 
     def iteration(self):
-        # cur_nodes = self.touching_nodes
-        for p in range(self._n_seats):
-            self._compute_cfv()
-            self._compute_regrets(p_id=p)
-            self._compute_new_strategy(p_id=p)
-            self._update_reach_probs()
-            self._add_strategy_to_average(p_id=p)
-        # print("nodes", self.touching_nodes - cur_nodes)
-        # cur_nodes = self.touching_nodes
+        raise NotImplementedError
 
-        self._iter_counter += 1
-
-        self._compute_cfv()
-        self._log_curr_strat_expl()
-        expl = self._evaluate_avg_strats()
-        return expl
+    def print_tree(self, node):
+        print("node value", node.reach_probs)
+        for c in node.children:
+            print("chil value", c.reach_probs)
+            # self.print_tree(c)
 
     def _compute_cfv(self):
+        # Compute node.ev_weighted, node.ev_br_weighted, node.epsilon, node.exploitability
         for t_idx in range(len(self._trees)):
             self._trees[t_idx].compute_ev()
+
+    def _compute_mc_cfv(self, p_id):
+        # Compute node.ev_weighted, node.ev_br_weighted, node.epsilon, node.exploitability
+        for t_idx in range(len(self._trees)):
+            self._trees[t_idx].compute_mc_ev(p_id)
 
     def _regret_formula_first_it(self, ev_all_actions, strat_ev):
         raise NotImplementedError
@@ -153,7 +167,6 @@ class CFRBase:
         for t_idx in range(len(self._trees)):
             def __compute_evs(_node):
                 # EV of each action
-                self.touching_nodes += len(np.nonzero(_node.reach_probs[0])[0]) * len(np.nonzero(_node.reach_probs[1])[0])
                 N_ACTIONS = len(_node.children)
                 ev_all_actions = np.zeros(shape=(self._env_bldrs[t_idx].rules.RANGE_SIZE, N_ACTIONS), dtype=np.float32)
                 for i, child in enumerate(_node.children):
@@ -163,6 +176,7 @@ class CFRBase:
                 strat_ev = _node.ev[p_id]
                 strat_ev = np.expand_dims(strat_ev, axis=-1).repeat(N_ACTIONS, axis=-1)
 
+                self.touching_nodes += len(np.nonzero(_node.reach_probs[0])[0]) * len(np.nonzero(_node.reach_probs[1])[0])
                 return strat_ev, ev_all_actions
 
             def _fill_after_first(_node):
@@ -184,19 +198,24 @@ class CFRBase:
 
                 for c in _node.children:
                     _fill_first(c)
+                    
 
             if self._iter_counter == 0:
                 _fill_first(self._trees[t_idx].root)
             else:
                 _fill_after_first(self._trees[t_idx].root)
 
-    def _compute_new_strategy(self, p_id):
+    def _compute_new_strategy(self, p_id, inner_loop=False):
         """ Assumes regrets have been computed for player ""p_id"" already! """
         raise NotImplementedError
 
     def _update_reach_probs(self):
         for t_idx in range(len(self._trees)):
             self._trees[t_idx].update_reach_probs()
+
+    def _compute_reach_probs(self, p_id):
+        for t_idx in range(len(self._trees)):
+            self._trees[t_idx].compute_reach_probs(p_id)
 
     def _add_strategy_to_average(self, p_id):
         raise NotImplementedError
@@ -225,7 +244,7 @@ class CFRBase:
         expl_totals = []
         for t_idx in range(len(self._trees)):
             METRIC = self._env_bldrs[t_idx].env_cls.WIN_METRIC
-            eval_tree = PublicTree(env_bldr=self._env_bldrs[t_idx],
+            eval_tree = MCPublicTree(env_bldr=self._env_bldrs[t_idx],
                                    stack_size=self._env_args[t_idx].starting_stack_sizes_list,
                                    stop_at_street=None,
                                    is_debugging=False,
@@ -283,3 +302,18 @@ class CFRBase:
 
         for t_idx in range(len(self._trees)):
             __reset(self._trees[t_idx].root, _p_id=p_id)
+
+
+    def _generate_samples(self, p_id, player=False, opponent=False, chance_p=False):
+        for t_idx in range(len(self._trees)):
+            self._trees[t_idx].generate_samples(p_id, player, opponent, chance_p)
+
+    def _calcultate_variance(self):
+        variances = []
+        for t_idx in range(len(self._trees)):
+            self._trees[t_idx].calcultate_variance()
+            v = np.mean((self._trees[t_idx].root.ev - self._trees[t_idx].root.true_ev)**2)
+            # v = np.mean((self._trees[t_idx].root.ev - self._trees[t_idx].root.true_ev)**2)
+            variances.append(v)
+        return variances
+

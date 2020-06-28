@@ -40,6 +40,15 @@ class NodeBase:
         # Any algorithm using a PublicTree to run on (e.g. CFR, CFR+) can use this to hold a dict of vals
         self.data = None
 
+        self.V_value = None
+        self.stg_diff = None
+        self.M_value = None
+        self.ref_ev = None
+        self.cur_ev = None
+        self.cur_ref_ev = None
+        self.ref_reach_probs = None
+        self.ref_strategy = None
+        self.sample_reach_probs = None
 
 class PlayerActionNode(NodeBase):
 
